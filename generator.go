@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"strings"
@@ -64,20 +64,18 @@ func (g *BillionRowGenerator) GetStationCount() int {
 	return len(g.stations)
 }
 
-func (g *BillionRowGenerator) generateChunk(numRows int, seed int64, output chan<- string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	rng := rand.New(rand.NewSource(seed))
+func (g *BillionRowGenerator) generateChunk(numRows int, seed1, seed2 uint64) string {
+	rng := rand.New(rand.NewPCG(seed1, seed2))
 	var builder strings.Builder
-	builder.Grow(numRows * 40) // Pre-allocate space
+	builder.Grow(numRows * 40)
 
-	for i := 0; i < numRows; i++ {
-		station := g.stations[rng.Intn(len(g.stations))]
+	for range numRows {
+		station := g.stations[rng.IntN(len(g.stations))]
 		temp := -100.0 + rng.Float64()*200.0 // -100 to 100
-		builder.WriteString(fmt.Sprintf("%s;%.2f\n", station, temp))
+		fmt.Fprintf(&builder, "%s;%.2f\n", station, temp)
 	}
 
-	output <- builder.String()
+	return builder.String()
 }
 
 func (g *BillionRowGenerator) Generate(outputFilename string) error {
@@ -101,12 +99,12 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 	defer func() { _ = writer.Flush() }()
 
 	output := make(chan string, numWorkers*2)
-	var wg sync.WaitGroup
+	var wgWriter, wg sync.WaitGroup
 
 	// Writer goroutine
-	wg.Add(1)
+	wgWriter.Add(1)
 	go func() {
-		defer wg.Done()
+		defer wgWriter.Done()
 		chunksWritten := 0
 		for chunk := range output {
 			_, _ = writer.WriteString(chunk)
@@ -126,13 +124,16 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 	for i := range numChunks {
 		semaphore <- struct{}{}
 		go func(chunkId int) {
-			defer func() { <-semaphore }()
-			g.generateChunk(chunkSize, int64(chunkId), output, &wg)
+			defer func() { wg.Done(); <-semaphore }()
+			output <- g.generateChunk(
+				chunkSize, uint64(chunkId), uint64(time.Now().Unix()),
+			)
 		}(i)
 	}
 
 	wg.Wait()
 	close(output)
+	wgWriter.Wait()
 
 	duration := time.Since(startTime)
 	fmt.Printf("Generation complete in %v\n", duration)
