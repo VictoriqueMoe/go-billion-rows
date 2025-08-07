@@ -35,7 +35,7 @@ func (g *BillionRowGenerator) LoadStations(filename string) error {
 	if err != nil {
 		return fmt.Errorf("error opening stations file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var stations []string
 	scanner := bufio.NewScanner(file)
@@ -95,20 +95,21 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 	if err != nil {
 		return fmt.Errorf("error creating output file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	writer := bufio.NewWriterSize(file, 64*1024*1024) // 64MB buffer
-	defer writer.Flush()
+	defer func() { _ = writer.Flush() }()
 
 	output := make(chan string, numWorkers*2)
 	var wg sync.WaitGroup
 
 	// Writer goroutine
-	writerDone := make(chan bool)
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		chunksWritten := 0
 		for chunk := range output {
-			writer.WriteString(chunk)
+			_, _ = writer.WriteString(chunk)
 			chunksWritten++
 			if chunksWritten%10 == 0 {
 				progress := float64(chunksWritten) / float64(numChunks) * 100
@@ -116,15 +117,14 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 					chunksWritten, numChunks, progress)
 			}
 		}
-		writerDone <- true
 	}()
 
 	semaphore := make(chan struct{}, numWorkers)
 	startTime := time.Now()
 
-	for i := 0; i < numChunks; i++ {
+	wg.Add(numChunks)
+	for i := range numChunks {
 		semaphore <- struct{}{}
-		wg.Add(1)
 		go func(chunkId int) {
 			defer func() { <-semaphore }()
 			g.generateChunk(chunkSize, int64(chunkId), output, &wg)
@@ -133,7 +133,6 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 
 	wg.Wait()
 	close(output)
-	<-writerDone
 
 	duration := time.Since(startTime)
 	fmt.Printf("Generation complete in %v\n", duration)
