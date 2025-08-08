@@ -3,7 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"os"
 	"runtime"
 	"strings"
@@ -35,7 +35,7 @@ func (g *BillionRowGenerator) LoadStations(filename string) error {
 	if err != nil {
 		return fmt.Errorf("error opening stations file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	var stations []string
 	scanner := bufio.NewScanner(file)
@@ -64,20 +64,18 @@ func (g *BillionRowGenerator) GetStationCount() int {
 	return len(g.stations)
 }
 
-func (g *BillionRowGenerator) generateChunk(numRows int, seed int64, output chan<- string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	rng := rand.New(rand.NewSource(seed))
+func (g *BillionRowGenerator) generateChunk(numRows int, seed1, seed2 uint64) string {
+	rng := rand.New(rand.NewPCG(seed1, seed2))
 	var builder strings.Builder
-	builder.Grow(numRows * 40) // Pre-allocate space
+	builder.Grow(numRows * 40)
 
-	for i := 0; i < numRows; i++ {
-		station := g.stations[rng.Intn(len(g.stations))]
+	for range numRows {
+		station := g.stations[rng.IntN(len(g.stations))]
 		temp := -100.0 + rng.Float64()*200.0 // -100 to 100
-		builder.WriteString(fmt.Sprintf("%s;%.2f\n", station, temp))
+		fmt.Fprintf(&builder, "%s;%.2f\n", station, temp)
 	}
 
-	output <- builder.String()
+	return builder.String()
 }
 
 func (g *BillionRowGenerator) Generate(outputFilename string) error {
@@ -95,20 +93,21 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 	if err != nil {
 		return fmt.Errorf("error creating output file: %v", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	writer := bufio.NewWriterSize(file, 64*1024*1024) // 64MB buffer
-	defer writer.Flush()
+	defer func() { _ = writer.Flush() }()
 
 	output := make(chan string, numWorkers*2)
-	var wg sync.WaitGroup
+	var wgWriter, wg sync.WaitGroup
 
 	// Writer goroutine
-	writerDone := make(chan bool)
+	wgWriter.Add(1)
 	go func() {
+		defer wgWriter.Done()
 		chunksWritten := 0
 		for chunk := range output {
-			writer.WriteString(chunk)
+			_, _ = writer.WriteString(chunk)
 			chunksWritten++
 			if chunksWritten%10 == 0 {
 				progress := float64(chunksWritten) / float64(numChunks) * 100
@@ -116,24 +115,25 @@ func (g *BillionRowGenerator) Generate(outputFilename string) error {
 					chunksWritten, numChunks, progress)
 			}
 		}
-		writerDone <- true
 	}()
 
 	semaphore := make(chan struct{}, numWorkers)
 	startTime := time.Now()
 
-	for i := 0; i < numChunks; i++ {
+	wg.Add(numChunks)
+	for i := range numChunks {
 		semaphore <- struct{}{}
-		wg.Add(1)
 		go func(chunkId int) {
-			defer func() { <-semaphore }()
-			g.generateChunk(chunkSize, int64(chunkId), output, &wg)
+			defer func() { wg.Done(); <-semaphore }()
+			output <- g.generateChunk(
+				chunkSize, uint64(chunkId), uint64(time.Now().Unix()),
+			)
 		}(i)
 	}
 
 	wg.Wait()
 	close(output)
-	<-writerDone
+	wgWriter.Wait()
 
 	duration := time.Since(startTime)
 	fmt.Printf("Generation complete in %v\n", duration)
