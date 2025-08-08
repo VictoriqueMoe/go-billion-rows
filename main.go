@@ -110,7 +110,7 @@ func MustRun(args []string, stdout, stderr io.Writer) error {
 	var errg errgroup.Group
 	for i := range *fWorkers {
 		errg.Go(func() (err error) {
-			results[i], err = processChunk(data, chunks[i][0], chunks[i][1])
+			results[i], err = processChunk(data, chunks[i])
 			return err
 		})
 	}
@@ -220,10 +220,10 @@ END:
 	return input[:offset]
 }
 
-func processChunk(data string, i, end int64) (map[string]*StationStats, error) {
+func processChunk(data string, chunk [2]int64) (map[string]*StationStats, error) {
 	stats := make(map[string]*StationStats, 10_000)
-
-	buffer := make([]float64, 0, 16*1024) // 128 KiB
+	i := chunk[0]
+	end := chunk[1]
 
 	for i < end {
 		// slice of remaining data
@@ -252,26 +252,18 @@ func processChunk(data string, i, end int64) (map[string]*StationStats, error) {
 			i++
 		}
 
-		if len(buffer) == cap(buffer) {
-			// Drain buffer
-			for _, temp := range buffer {
-				if s, ok := stats[name]; ok {
-					s.Min = min(s.Min, temp)
-					s.Max = max(s.Max, temp)
-					s.Sum += temp
-					s.Count++
-				} else {
-					stats[name] = &StationStats{
-						Min:   temp,
-						Max:   temp,
-						Sum:   temp,
-						Count: 1,
-					}
-				}
-			}
-			buffer = buffer[:0]
+		if s, ok := stats[name]; ok {
+			s.Min = min(s.Min, temp)
+			s.Max = max(s.Max, temp)
+			s.Sum += temp
+			s.Count++
 		} else {
-			buffer = append(buffer, temp)
+			stats[name] = &StationStats{
+				Min:   temp,
+				Max:   temp,
+				Sum:   temp,
+				Count: 1,
+			}
 		}
 	}
 
